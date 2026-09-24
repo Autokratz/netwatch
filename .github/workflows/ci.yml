@@ -121,7 +121,10 @@ jobs:
           host = "127.0.0.1"
           port = 1
           timeout_s = 0.2
-          loss_pct = 99.0
+          # 100.0, not 99.0: comparison is strictly greater than, so total
+          # loss against a closed port does not breach. This step exercises
+          # history writing, not alerting.
+          loss_pct = 100.0
           TOML
           netwatch run -c ok.toml -n 3 -q
           test -f out/history.csv
