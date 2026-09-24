@@ -1,0 +1,38 @@
+# netwatch example configuration.
+#
+# Every value below is also the default, except where noted, so this file
+# doubles as the reference. See docs/CONFIGURATION.md for the full list.
+
+interval_s   = 10.0        # seconds between passes over all targets
+window_size  = 12          # samples retained per target (12 x 10s = 2 minutes)
+history_path = "out/history.csv"
+
+# The default gateway. Loss here means the local network, not the internet,
+# so the threshold is tight and the alert is meant to be believed.
+[[target]]
+name       = "gateway"
+kind       = "icmp"
+host       = "10.20.0.1"
+rtt_p95_ms = 20.0
+loss_pct   = 5.0
+
+# A public resolver, as a reference path. Latency to the internet varies far
+# more than latency to the gateway, so the threshold is looser and it takes
+# longer to fire.
+[[target]]
+name         = "internet"
+kind         = "icmp"
+host         = "1.1.1.1"
+rtt_p95_ms   = 120.0
+loss_pct     = 10.0
+for_breaches = 5
+
+# An application endpoint. TCP rather than ICMP, because a handshake proves
+# the service is accepting connections and an echo reply does not.
+[[target]]
+name       = "api"
+kind       = "tcp"
+host       = "1.1.1.1"
+port       = 443
+timeout_s  = 3.0
+rtt_p95_ms = 250.0
