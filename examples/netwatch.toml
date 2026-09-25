@@ -7,12 +7,20 @@ interval_s   = 10.0        # seconds between passes over all targets
 window_size  = 12          # samples retained per target (12 x 10s = 2 minutes)
 history_path = "out/history.csv"
 
-# The default gateway. Loss here means the local network, not the internet,
-# so the threshold is tight and the alert is meant to be believed.
+# Loopback, so this file works the moment you clone the repository and the
+# README's example output is what you actually see. Replace it with your own
+# gateway, where loss means the local network rather than the internet:
+#
+#   [[target]]
+#   name       = "gateway"
+#   kind       = "icmp"
+#   host       = "10.20.0.1"
+#   rtt_p95_ms = 20.0
+#   loss_pct   = 5.0
 [[target]]
-name       = "gateway"
+name       = "loopback"
 kind       = "icmp"
-host       = "10.20.0.1"
+host       = "127.0.0.1"
 rtt_p95_ms = 20.0
 loss_pct   = 5.0
 

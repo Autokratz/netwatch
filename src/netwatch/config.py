@@ -96,6 +96,10 @@ def _as_int(value: Any, key: str, where: str) -> int:
 
 def _parse_target(raw: dict[str, Any], index: int) -> TargetConfig:
     where = f"target[{index}]"
+    # A bare value in the array is valid TOML and used to reach .get() as a str
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: each [[target]] must be a table, got {type(raw).__name__}")
+
     name = raw.get("name")
     if isinstance(name, str) and name.strip():
         where = f"target {name!r}"
@@ -189,8 +193,11 @@ def load_config(path: Path) -> Config:
         seen.add(t.name)
 
     history = data.get("history_path")
-    if history is not None and not isinstance(history, str):
-        raise ConfigError(f"{path}: history_path must be a string")
+    if history is not None:
+        if not isinstance(history, str):
+            raise ConfigError(f"{path}: history_path must be a string")
+        if not history.strip():
+            raise ConfigError(f"{path}: history_path is empty. Remove the key to disable history.")
 
     return Config(
         interval_s=interval_s,

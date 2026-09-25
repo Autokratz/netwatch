@@ -70,13 +70,19 @@ class TestRenderTable:
         assert render_table([]) == "no data"
 
     def test_columns_align(self):
+        """The old assertion here was a tautology that passed for any input,
+        including a completely misaligned table. Pin a real column instead."""
         rows = [
             WindowStats("gw", 10, 10, 0, 0.0, 1.5, 2.0, 2.5, None),
             WindowStats("a-very-long-target-name", 10, 9, 1, 10.0, 100.0, 200.0, 250.0, "x"),
         ]
         lines = render_table(rows).splitlines()
-        assert len({len(line.rstrip()) for line in lines}) <= len(lines)
         assert "TARGET" in lines[0]
+
+        # every row must start its SAMPLES column at the same offset
+        header_offset = lines[0].index("SAMPLES")
+        for row, expected in zip(lines[2:], ["10", "10"], strict=True):
+            assert row[: header_offset + len("SAMPLES")].endswith(expected), row
 
     def test_missing_latency_renders_as_a_dash(self):
         rows = [WindowStats("gw", 5, 0, 5, 100.0, None, None, None, "down")]
@@ -151,7 +157,7 @@ class TestMonitor:
         probe = FakeProbe("gw", [ok("gw", 10.0)])
         monitor = Monitor(_config(), probes=[probe], sleep=lambda _: None)
 
-        outcomes = monitor.run(interval_s=0.0, ticks=4)
+        outcomes = list(monitor.run(interval_s=0.0, ticks=4))
         assert len(outcomes) == 4
         assert probe.calls == 4
 
@@ -160,7 +166,7 @@ class TestMonitor:
         probe = FakeProbe("gw", [ok("gw", 10.0)])
         monitor = Monitor(_config(), probes=[probe], sleep=slept.append)
 
-        monitor.run(interval_s=5.0, ticks=3)
+        list(monitor.run(interval_s=5.0, ticks=3))
         assert len(slept) == 2, "n ticks means n-1 sleeps"
 
     def test_history_receives_every_sample(self, tmp_path):
@@ -168,7 +174,7 @@ class TestMonitor:
         probe = FakeProbe("gw", [ok("gw", 10.0)])
         with HistoryWriter(path) as history:
             monitor = Monitor(_config(), probes=[probe], history=history, sleep=lambda _: None)
-            monitor.run(interval_s=0.0, ticks=3)
+            list(monitor.run(interval_s=0.0, ticks=3))
 
         assert len(list(read_history(path))) == 3
 
@@ -176,7 +182,7 @@ class TestMonitor:
         probe = FakeProbe("gw", [ok("gw", 10.0)])
         monitor = Monitor(_config(window=3), probes=[probe], sleep=lambda _: None)
 
-        monitor.run(interval_s=0.0, ticks=50)
+        list(monitor.run(interval_s=0.0, ticks=50))
         assert monitor.current_stats()[0].samples == 3
 
 
@@ -190,3 +196,80 @@ class TestRollingWindowIntegration:
         assert s.samples == 100
         assert 0 < s.loss_pct < 100
         assert s.rtt_p95_ms is not None
+
+
+class TestHistoryIsRobust:
+    def test_a_row_truncated_mid_write_is_skipped(self, tmp_path):
+        """csv.DictReader pads a short row with None rather than raising, so
+        this used to yield ProbeResult(target=None) and crash the report."""
+        path = tmp_path / "history.csv"
+        with HistoryWriter(path) as w:
+            w.append(ok("gw", 10.0))
+            w.append(ok("gw", 12.0))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("3.0")  # power cut mid-row
+
+        recovered = list(read_history(path))
+        assert len(recovered) == 2
+        assert all(r.target == "gw" for r in recovered)
+
+    def test_a_row_truncated_after_the_target_is_not_read_as_a_failure(self, tmp_path):
+        """A short row used to become a fabricated failed sample, silently
+        inflating loss_pct in the report."""
+        path = tmp_path / "history.csv"
+        with HistoryWriter(path) as w:
+            w.append(ok("gw", 10.0))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("2.0,iso,gw\n")
+
+        recovered = list(read_history(path))
+        assert len(recovered) == 1
+        assert recovered[0].success
+
+    def test_summarise_survives_a_truncated_file(self, tmp_path):
+        path = tmp_path / "history.csv"
+        with HistoryWriter(path) as w:
+            w.append(ok("gw", 10.0))
+            w.append(ok("api", 20.0))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("9.9")
+
+        summaries = summarise_history(read_history(path))
+        assert [s.target for s in summaries] == ["api", "gw"]
+
+
+class TestHistoryFailureDoesNotStopTheMonitor:
+    def test_a_write_error_does_not_stop_the_tick_or_corrupt_the_sample(self, tmp_path, capsys):
+        """A full disk is not a network fault. The probe result must stay
+        truthful, or loss climbs and an alert fires for the wrong reason."""
+
+        class Exploding(HistoryWriter):
+            def append(self, result):
+                raise OSError("No space left on device")
+
+        writer = Exploding(tmp_path / "h.csv")
+        probe = FakeProbe("gw", [ok("gw", 10.0)])
+        monitor = Monitor(_config(), probes=[probe], history=writer, sleep=lambda _: None)
+
+        outcome = monitor.tick()
+        assert outcome.results[0].success
+        assert outcome.results[0].rtt_ms == pytest.approx(10.0)
+        assert outcome.stats[0].loss_pct == 0.0
+        assert "history write failed" in capsys.readouterr().err
+        writer.close()
+
+    def test_a_broken_sink_is_dropped_rather_than_retried_every_tick(self, tmp_path):
+        attempts = {"n": 0}
+
+        class Exploding(HistoryWriter):
+            def append(self, result):
+                attempts["n"] += 1
+                raise OSError("No space left on device")
+
+        writer = Exploding(tmp_path / "h.csv")
+        probe = FakeProbe("gw", [ok("gw", 10.0)])
+        monitor = Monitor(_config(), probes=[probe], history=writer, sleep=lambda _: None)
+
+        list(monitor.run(interval_s=0.0, ticks=5))
+        assert attempts["n"] == 1
+        writer.close()

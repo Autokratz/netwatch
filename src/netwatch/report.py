@@ -7,9 +7,11 @@ terminal that has no colour and no unicode.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 
 from netwatch.alerting import AlertState
+from netwatch.probes import ProbeResult
 from netwatch.window import WindowStats
 
 __all__ = ["render_table", "summarise_history"]
@@ -59,25 +61,13 @@ def render_table(
     return "\n".join(out)
 
 
-def summarise_history(results: Iterable[object]) -> list[WindowStats]:
+def summarise_history(results: Iterable[ProbeResult]) -> list[WindowStats]:
     """Group history rows by target and summarise each.
 
     Unbounded by design: a history file is finite and already on disk, so the
     rolling-window cap that protects the live loop is not needed here.
     """
-    from netwatch.probes import ProbeResult
-    from netwatch.window import RollingWindow
-
-    buckets: dict[str, list[ProbeResult]] = {}
-    for item in results:
-        if not isinstance(item, ProbeResult):
-            continue
-        buckets.setdefault(item.target, []).append(item)
-
-    summaries: list[WindowStats] = []
-    for target, items in sorted(buckets.items()):
-        window = RollingWindow(target, size=len(items))
-        for item in items:
-            window.add(item)
-        summaries.append(window.stats())
-    return summaries
+    buckets: defaultdict[str, list[ProbeResult]] = defaultdict(list)
+    for result in results:
+        buckets[result.target].append(result)
+    return [WindowStats.from_results(t, rs) for t, rs in sorted(buckets.items())]

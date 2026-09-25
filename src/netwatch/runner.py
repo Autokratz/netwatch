@@ -12,8 +12,10 @@ tick continues - one bad target must not stop the monitor.
 
 from __future__ import annotations
 
+import itertools
+import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 from netwatch.alerting import AlertEngine, AlertEvent, AlertState
@@ -75,7 +77,18 @@ class Monitor:
             window.add(result)
 
             if self._history is not None:
-                self._history.append(result)
+                try:
+                    self._history.append(result)
+                except OSError as exc:
+                    # A full disk is not a network fault. Recording it as one
+                    # would inflate loss and could fire a false alert, so the
+                    # measurement stays truthful and the sink is dropped
+                    # instead of failing again on every tick.
+                    print(
+                        f"netwatch: history write failed, continuing without it: {exc}",
+                        file=sys.stderr,
+                    )
+                    self._history = None
 
             summary = window.stats()
             stats.append(summary)
@@ -86,28 +99,34 @@ class Monitor:
 
         return TickOutcome(tuple(results), tuple(stats), tuple(events))
 
-    def run(self, interval_s: float, ticks: int | None = None) -> list[TickOutcome]:
-        """Run ``ticks`` passes, or forever when ``ticks`` is None.
+    def run(
+        self,
+        interval_s: float,
+        ticks: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> Iterator[TickOutcome]:
+        """Yield one outcome per pass, forever when ``ticks`` is None.
 
-        Sleeps for the remainder of the interval after the work, not the whole
-        interval, so a slow probe does not make the schedule drift.
+        Yielding rather than accumulating lets the caller print each pass as it
+        happens, which is why the CLI no longer needs its own copy of this loop.
+        ``should_stop`` is consulted before the wait and again after it, so an
+        interrupt arriving mid-wait does not buy one more full round of probes.
+
+        The wait is the remainder of the interval, not the whole of it, so a
+        slow probe does not make the schedule drift.
         """
-        outcomes: list[TickOutcome] = []
-        remaining = ticks
+        passes = itertools.count() if ticks is None else range(ticks)
+        due: float | None = None
 
-        while remaining is None or remaining > 0:
-            started = time.perf_counter()
-            outcomes.append(self.tick())
-
-            if remaining is not None:
-                remaining -= 1
-                if remaining == 0:
-                    break
-
-            elapsed = time.perf_counter() - started
-            self._sleep(max(0.0, interval_s - elapsed))
-
-        return outcomes
+        for _ in passes:
+            if should_stop is not None and should_stop():
+                return
+            if due is not None:
+                self._sleep(max(0.0, due - time.perf_counter()))
+                if should_stop is not None and should_stop():
+                    return
+            due = time.perf_counter() + interval_s
+            yield self.tick()
 
     def current_stats(self) -> list[WindowStats]:
         return [w.stats() for w in self._windows.values()]

@@ -7,7 +7,7 @@ finishes in milliseconds and gives the same answer every time.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import pytest
@@ -70,10 +70,3 @@ def config(thresholds: Thresholds) -> Config:
             ),
         ),
     )
-
-
-@pytest.fixture
-def no_sleep() -> Iterator[list[float]]:
-    """Collects the durations the runner would have slept for."""
-    recorded: list[float] = []
-    yield recorded

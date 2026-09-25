@@ -4,7 +4,13 @@ import subprocess
 
 import pytest
 
-from netwatch.probes import IcmpProbe, TcpProbe, build_probe, parse_ping_rtt
+from netwatch.probes import (
+    IcmpProbe,
+    ProbeResult,
+    TcpProbe,
+    build_probe,
+    parse_ping_rtt,
+)
 
 IPUTILS = """PING 10.0.0.1 (10.0.0.1) 56(84) bytes of data.
 64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=0.412 ms
@@ -115,6 +121,7 @@ class TestIcmpProbe:
 
 
 class TestTcpProbe:
+    @pytest.mark.integration
     def test_refused_connection_is_a_failure(self):
         # Port 1 on the loopback: nothing listens, and the refusal is immediate.
         result = TcpProbe("closed", "127.0.0.1", 1, timeout_s=1.0).measure()
@@ -122,6 +129,7 @@ class TestTcpProbe:
         assert result.rtt_ms is None
         assert result.error
 
+    @pytest.mark.integration
     def test_successful_connection_is_timed(self):
         import socket
         import threading
@@ -155,3 +163,13 @@ class TestBuildProbe:
     def test_unknown_kind_is_rejected_and_names_the_target(self):
         with pytest.raises(ValueError, match="unknown probe kind"):
             build_probe("weird", "carrier-pigeon", "somewhere")
+
+
+class TestProbeResultInvariants:
+    def test_success_without_an_rtt_is_rejected(self):
+        with pytest.raises(ValueError, match="must carry an rtt_ms"):
+            ProbeResult("gw", 0.0, success=True)
+
+    def test_failure_carrying_an_rtt_is_rejected(self):
+        with pytest.raises(ValueError, match="must not carry an rtt_ms"):
+            ProbeResult("gw", 0.0, success=False, rtt_ms=5.0)

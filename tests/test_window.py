@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from netwatch.probes import ProbeResult
 from netwatch.window import RollingWindow, percentile
 from tests.conftest import fail, ok
 
@@ -103,19 +102,3 @@ class TestRollingWindow:
         window.add(fail("gw", "most recent"))
 
         assert window.stats().last_error == "most recent"
-
-    def test_clear_empties_the_window(self):
-        window = RollingWindow("gw", 3)
-        window.add(ok("gw", 1.0))
-        window.clear()
-        assert len(window) == 0
-
-
-class TestProbeResultInvariants:
-    def test_success_without_an_rtt_is_rejected(self):
-        with pytest.raises(ValueError, match="must carry an rtt_ms"):
-            ProbeResult("gw", 0.0, success=True)
-
-    def test_failure_carrying_an_rtt_is_rejected(self):
-        with pytest.raises(ValueError, match="must not carry an rtt_ms"):
-            ProbeResult("gw", 0.0, success=False, rtt_ms=5.0)

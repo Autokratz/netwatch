@@ -18,6 +18,7 @@ import argparse
 import signal
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -36,18 +37,35 @@ EXIT_CONFIG = 2
 
 @dataclass(slots=True)
 class _Interrupt:
-    """Mutable flag a signal handler can set without a module-level global."""
+    """Records a stop request, and gets out of the way if asked twice.
+
+    A tick may be mid-write to the history, so the first Ctrl-C only sets a
+    flag that the loop checks between passes. A second one restores Python's
+    default handler, so an impatient user is not stuck with a monitor that
+    ignores them.
+    """
 
     requested: bool = False
 
     def handle(self, signum: int, frame: FrameType | None) -> None:
-        """Finish the current tick, then stop.
-
-        Killing the process mid-write would leave a partial row in the
-        history, so this only records intent; the loop checks it between
-        ticks.
-        """
+        if self.requested:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            raise KeyboardInterrupt
         self.requested = True
+
+    def wait(self, seconds: float) -> None:
+        """Sleep, but notice an interrupt rather than serving the full term.
+
+        time.sleep resumes for its whole remaining duration once a handler
+        returns (PEP 475), so a plain sleep would swallow Ctrl-C for a full
+        interval. Short slices keep it responsive.
+        """
+        deadline = time.perf_counter() + seconds
+        while not self.requested:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.2, remaining))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,37 +110,36 @@ def _firing(monitor: Monitor) -> list[str]:
 def cmd_run(args: argparse.Namespace) -> int:
     config = _load(args.config)
     interrupt = _Interrupt()
-    signal.signal(signal.SIGINT, interrupt.handle)
+    previous = signal.signal(signal.SIGINT, interrupt.handle)
 
     history: HistoryWriter | None = None
     try:
         if config.history_path is not None:
-            history = HistoryWriter(config.history_path)
+            try:
+                history = HistoryWriter(config.history_path)
+            except OSError as exc:
+                print(
+                    f"netwatch: cannot write history to {config.history_path}: {exc}",
+                    file=sys.stderr,
+                )
+                return EXIT_CONFIG
             print(f"history -> {history.path}", file=sys.stderr)
 
-        monitor = Monitor(config, history=history)
-        remaining: int | None = args.ticks
+        monitor = Monitor(config, history=history, sleep=interrupt.wait)
 
-        while remaining is None or remaining > 0:
-            outcome = monitor.tick()
-
+        for outcome in monitor.run(
+            config.interval_s, args.ticks, should_stop=lambda: interrupt.requested
+        ):
             for event in outcome.events:
                 print(event.format_line(), flush=True)
-
             if not args.quiet:
                 print(render_table(outcome.stats, monitor.alert_states()), flush=True)
                 print(flush=True)
 
-            if remaining is not None:
-                remaining -= 1
-                if remaining == 0:
-                    break
-            if interrupt.requested:
-                print("interrupted, stopping after this pass", file=sys.stderr)
-                break
-
-            time.sleep(config.interval_s)
+        if interrupt.requested:
+            print("interrupted, stopped after the current pass", file=sys.stderr)
     finally:
+        signal.signal(signal.SIGINT, previous)
         if history is not None:
             history.close()
 
@@ -132,7 +149,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     config = _load(args.config)
     monitor = Monitor(config)
-    monitor.run(interval_s=config.interval_s, ticks=args.ticks)
+    deque(monitor.run(interval_s=config.interval_s, ticks=args.ticks), maxlen=0)
 
     print(render_table(monitor.current_stats(), monitor.alert_states()))
 

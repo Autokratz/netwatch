@@ -3,6 +3,8 @@ as behaviour rather than left to manual checking."""
 
 from __future__ import annotations
 
+import signal
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -135,11 +137,68 @@ class TestRunWritesHistory:
 
 
 class TestInterrupt:
-    def test_handler_records_intent_without_raising(self):
+    def test_first_signal_records_intent_without_raising(self):
         """SIGINT must not tear down mid-write; it sets a flag the loop reads
-        between ticks."""
+        between passes."""
         interrupt = _Interrupt()
         assert not interrupt.requested
 
         interrupt.handle(2, None)
         assert interrupt.requested
+
+    def test_second_signal_escalates(self):
+        """A user who presses Ctrl-C twice is not asking politely any more."""
+        interrupt = _Interrupt()
+        interrupt.handle(2, None)
+
+        previous = signal.getsignal(signal.SIGINT)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                interrupt.handle(2, None)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+
+    def test_wait_returns_early_once_interrupted(self):
+        """time.sleep serves its full term after a handler returns (PEP 475),
+        so a plain sleep would swallow Ctrl-C for a whole interval."""
+        interrupt = _Interrupt()
+        interrupt.requested = True
+
+        started = time.perf_counter()
+        interrupt.wait(5.0)
+        assert time.perf_counter() - started < 0.5
+
+    def test_run_restores_the_previous_handler(self, config_file):
+        original = signal.getsignal(signal.SIGINT)
+        main(["run", "-c", str(config_file(GOOD_CONFIG)), "-n", "1", "-q"])
+        assert signal.getsignal(signal.SIGINT) is original
+
+
+class TestConfigFailuresExitTwo:
+    def test_an_unwritable_history_path_reports_instead_of_tracing(
+        self, tmp_path, config_file, capsys
+    ):
+        blocked = tmp_path / "blocked"
+        blocked.mkdir(mode=0o500)
+        path = config_file(
+            f'history_path = "{(blocked / "sub" / "h.csv").as_posix()}"\n' + GOOD_CONFIG
+        )
+        try:
+            assert main(["run", "-c", str(path), "-n", "1", "-q"]) == EXIT_CONFIG
+            assert "cannot write history" in capsys.readouterr().err
+        finally:
+            blocked.chmod(0o700)
+
+    def test_an_empty_history_path_is_rejected(self, config_file, capsys):
+        path = config_file('history_path = ""\n' + GOOD_CONFIG)
+        with pytest.raises(SystemExit) as exc:
+            main(["check", "-c", str(path)])
+        assert exc.value.code == EXIT_CONFIG
+        assert "history_path is empty" in capsys.readouterr().err
+
+    def test_a_target_that_is_not_a_table_is_rejected(self, config_file, capsys):
+        path = config_file('target = ["not-a-table"]\n')
+        with pytest.raises(SystemExit) as exc:
+            main(["check", "-c", str(path)])
+        assert exc.value.code == EXIT_CONFIG
+        assert "must be a table" in capsys.readouterr().err

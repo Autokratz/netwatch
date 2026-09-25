@@ -16,7 +16,7 @@ incident.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 from netwatch.window import WindowStats
@@ -98,10 +98,11 @@ def evaluate(stats: WindowStats, thresholds: Thresholds) -> tuple[str, ...]:
 
 @dataclass(slots=True)
 class _TargetState:
+    """One streak, because a target is either breaching or clear, never both."""
+
     state: AlertState = AlertState.OK
-    consecutive_breaches: int = 0
-    consecutive_clear: int = 0
-    last_reasons: tuple[str, ...] = field(default_factory=tuple)
+    breaching: bool = False
+    streak: int = 0
 
 
 class AlertEngine:
@@ -133,29 +134,14 @@ class AlertEngine:
         reasons = evaluate(stats, thresholds)
         breaching = bool(reasons)
 
-        if breaching:
-            target_state.consecutive_breaches += 1
-            target_state.consecutive_clear = 0
-            target_state.last_reasons = reasons
-        else:
-            target_state.consecutive_clear += 1
-            target_state.consecutive_breaches = 0
+        # Same verdict as last time extends the streak; a different one starts over.
+        target_state.streak = target_state.streak + 1 if breaching == target_state.breaching else 1
+        target_state.breaching = breaching
 
-        if (
-            target_state.state is AlertState.OK
-            and breaching
-            and target_state.consecutive_breaches >= thresholds.for_breaches
-        ):
-            target_state.state = AlertState.FIRING
-            return AlertEvent(stats.target, AlertState.FIRING, reasons, stats)
+        wanted = AlertState.FIRING if breaching else AlertState.OK
+        needed = thresholds.for_breaches if breaching else thresholds.clear_after
+        if target_state.state is wanted or target_state.streak < needed:
+            return None
 
-        if (
-            target_state.state is AlertState.FIRING
-            and not breaching
-            and target_state.consecutive_clear >= thresholds.clear_after
-        ):
-            target_state.state = AlertState.OK
-            target_state.last_reasons = ()
-            return AlertEvent(stats.target, AlertState.OK, (), stats)
-
-        return None
+        target_state.state = wanted
+        return AlertEvent(stats.target, wanted, reasons, stats)

@@ -87,8 +87,13 @@ def read_history(path: Path) -> Iterator[ProbeResult]:
     being investigated; one damaged final row should not make the preceding
     thousand unreadable.
     """
+    required = ("timestamp", "target", "success")
     with path.open(newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
+            # A short row is padded with None rather than raising, so a file
+            # truncated mid-write yields rows that look valid and are not.
+            if any(not row.get(field) for field in required):
+                continue
             try:
                 success = row["success"] == "1"
                 rtt_raw = row["rtt_ms"]
@@ -97,7 +102,7 @@ def read_history(path: Path) -> Iterator[ProbeResult]:
                     timestamp=float(row["timestamp"]),
                     success=success,
                     rtt_ms=float(rtt_raw) if success and rtt_raw else None,
-                    error=row["error"] or None,
+                    error=(row.get("error") or None),
                 )
             except (KeyError, ValueError):
                 continue

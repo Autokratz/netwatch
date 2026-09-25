@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from netwatch.probes import ProbeResult
@@ -60,6 +61,30 @@ class WindowStats:
     def is_empty(self) -> bool:
         return self.samples == 0
 
+    @classmethod
+    def from_results(cls, target: str, results: Iterable[ProbeResult]) -> WindowStats:
+        """Summarise any run of results. The statistics belong to the numbers,
+        not to the container that happened to hold them."""
+        items = list(results)
+        if not items:
+            return cls(target, 0, 0, 0, 0.0, None, None, None, None)
+
+        rtts = [r.rtt_ms for r in items if r.success and r.rtt_ms is not None]
+        successes = len(rtts)
+        failures = len(items) - successes
+        last_error = next((r.error for r in reversed(items) if not r.success and r.error), None)
+        return cls(
+            target=target,
+            samples=len(items),
+            successes=successes,
+            failures=failures,
+            loss_pct=failures / len(items) * 100.0,
+            rtt_avg_ms=(sum(rtts) / successes) if rtts else None,
+            rtt_p95_ms=percentile(rtts, 95.0) if rtts else None,
+            rtt_max_ms=max(rtts) if rtts else None,
+            last_error=last_error,
+        )
+
 
 class RollingWindow:
     """The last ``size`` results for one target.
@@ -97,32 +122,6 @@ class RollingWindow:
             )
         self._results.append(result)
 
-    def clear(self) -> None:
-        self._results.clear()
-
     def stats(self) -> WindowStats:
         """Summarise the current contents. Cheap enough to call every tick."""
-        total = len(self._results)
-        if total == 0:
-            return WindowStats(self._target, 0, 0, 0, 0.0, None, None, None, None)
-
-        rtts = [r.rtt_ms for r in self._results if r.success and r.rtt_ms is not None]
-        successes = len(rtts)
-        failures = total - successes
-
-        last_error = next(
-            (r.error for r in reversed(self._results) if not r.success and r.error),
-            None,
-        )
-
-        return WindowStats(
-            target=self._target,
-            samples=total,
-            successes=successes,
-            failures=failures,
-            loss_pct=failures / total * 100.0,
-            rtt_avg_ms=(sum(rtts) / successes) if rtts else None,
-            rtt_p95_ms=percentile(rtts, 95.0) if rtts else None,
-            rtt_max_ms=max(rtts) if rtts else None,
-            last_error=last_error,
-        )
+        return WindowStats.from_results(self._target, self._results)
